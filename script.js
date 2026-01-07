@@ -15,6 +15,9 @@ class TimeClockApp {
         // Set today's date for manual entry
         document.getElementById('manualDate').value = new Date().toISOString().split('T')[0];
         
+        // Restore Google Sheets settings
+        this.restoreGoogleSheetsSettings();
+        
         // Load Google API
         this.loadGoogleAPI();
         
@@ -27,6 +30,119 @@ class TimeClockApp {
 
         // Apply default filter
         this.applyFilter();
+
+        // Set up event listeners for persistent settings
+        this.setupSettingsListeners();
+    }
+
+    setupSettingsListeners() {
+        // Save spreadsheet URL when changed
+        const spreadsheetUrlInput = document.getElementById('spreadsheetUrl');
+        spreadsheetUrlInput.addEventListener('input', () => {
+            this.saveGoogleSheetsSettings();
+        });
+
+        // Save auto-sync setting when changed
+        const autoSyncCheckbox = document.getElementById('autoSyncEnabled');
+        autoSyncCheckbox.addEventListener('change', () => {
+            this.saveGoogleSheetsSettings();
+        });
+    }
+
+    restoreGoogleSheetsSettings() {
+        // Restore spreadsheet URL
+        const savedSpreadsheetUrl = localStorage.getItem('googleSheetsUrl');
+        if (savedSpreadsheetUrl) {
+            document.getElementById('spreadsheetUrl').value = savedSpreadsheetUrl;
+        }
+
+        // Restore auto-sync setting
+        const autoSyncEnabled = localStorage.getItem('autoSyncEnabled');
+        if (autoSyncEnabled !== null) {
+            document.getElementById('autoSyncEnabled').checked = autoSyncEnabled === 'true';
+        }
+
+        // Try to restore Google auth state if available
+        const savedAuthState = localStorage.getItem('googleAuthState');
+        if (savedAuthState) {
+            try {
+                const authState = JSON.parse(savedAuthState);
+                // Note: Access tokens expire, so we'll need to re-authenticate
+                // But we can remember that the user was previously connected
+                console.log('Previous Google Sheets connection found - will attempt to reconnect');
+                
+                // Show that user was previously connected
+                this.showConnectionReminder();
+            } catch (error) {
+                console.log('Could not restore auth state:', error);
+                localStorage.removeItem('googleAuthState');
+            }
+        }
+    }
+
+    showConnectionReminder() {
+        // Add a visual indicator that the user was previously connected
+        const authStatus = document.getElementById('authStatus');
+        const originalText = authStatus.textContent;
+        authStatus.innerHTML = `
+            <span style="color: #f59e0b;">⚡ Previously connected - click "Connect" to restore</span>
+        `;
+        
+        // Restore original text after a few seconds
+        setTimeout(() => {
+            if (!this.isSignedIn) {
+                authStatus.textContent = originalText;
+            }
+        }, 5000);
+    }
+
+    saveGoogleSheetsSettings() {
+        // Save spreadsheet URL
+        const spreadsheetUrl = document.getElementById('spreadsheetUrl').value;
+        if (spreadsheetUrl) {
+            localStorage.setItem('googleSheetsUrl', spreadsheetUrl);
+        }
+
+        // Save auto-sync setting
+        const autoSyncEnabled = document.getElementById('autoSyncEnabled').checked;
+        localStorage.setItem('autoSyncEnabled', autoSyncEnabled.toString());
+
+        // Save auth state (without sensitive tokens)
+        if (this.isSignedIn) {
+            const authState = {
+                isConnected: true,
+                connectedAt: new Date().toISOString()
+            };
+            localStorage.setItem('googleAuthState', JSON.stringify(authState));
+        }
+
+        // Show brief confirmation
+        this.showSaveConfirmation();
+    }
+
+    showSaveConfirmation() {
+        // Create or update save indicator
+        let saveIndicator = document.getElementById('saveIndicator');
+        if (!saveIndicator) {
+            saveIndicator = document.createElement('span');
+            saveIndicator.id = 'saveIndicator';
+            saveIndicator.style.cssText = `
+                margin-left: 10px;
+                font-size: 0.8em;
+                color: #22c55e;
+                opacity: 0;
+                transition: opacity 0.3s ease;
+            `;
+            document.getElementById('spreadsheetUrl').parentNode.appendChild(saveIndicator);
+        }
+
+        saveIndicator.textContent = '✓ Settings saved';
+        saveIndicator.style.opacity = '1';
+
+        // Fade out after 2 seconds
+        setTimeout(() => {
+            saveIndicator.style.opacity = '0';
+        }, 2000);
     }
 
     async loadGoogleAPI() {
@@ -392,6 +508,7 @@ class TimeClockApp {
             google.accounts.id.disableAutoSelect();
             this.isSignedIn = false;
             this.accessToken = null;
+            localStorage.removeItem('googleAuthState');
             this.updateAuthStatus();
             this.showNotification('Signed out from Google Sheets', 'info');
         } else {
@@ -404,6 +521,7 @@ class TimeClockApp {
                         this.accessToken = response.access_token;
                         this.isSignedIn = true;
                         this.updateAuthStatus();
+                        this.saveGoogleSheetsSettings();
                         this.showNotification('Successfully connected to Google Sheets!', 'success');
                     } else {
                         this.showNotification('Failed to get access token', 'error');
