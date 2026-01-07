@@ -1,6 +1,6 @@
 {
   "name": "time-clock-app",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A time clock application with Excel and Google Sheets integration",
   "main": "server.js",
   "scripts": {
