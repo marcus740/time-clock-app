@@ -31,32 +31,46 @@ class TimeClockApp {
 
     async loadGoogleAPI() {
         try {
+            // Wait for both gapi and google to be available
             await new Promise((resolve) => {
-                if (typeof gapi !== 'undefined') {
-                    resolve();
-                } else {
-                    window.onGoogleApiLoad = resolve;
+                const checkLibraries = () => {
+                    if (typeof gapi !== 'undefined' && typeof google !== 'undefined') {
+                        resolve();
+                    } else {
+                        setTimeout(checkLibraries, 100);
+                    }
+                };
+                checkLibraries();
+            });
+
+            // Initialize gapi client
+            await new Promise((resolve, reject) => {
+                gapi.load('client', {
+                    callback: resolve,
+                    onerror: reject
+                });
+            });
+
+            await gapi.client.init({
+                apiKey: 'AIzaSyDxBTHWVk1vXAlhpZF3N2ueBvVFUFqhJds',
+                discoveryDocs: ['https://sheets.googleapis.com/$discovery/rest?version=v4']
+            });
+
+            // Initialize Google Identity Services
+            google.accounts.id.initialize({
+                client_id: '172233323706-0089j5fuie81o8abd5lt64togifdoefc.apps.googleusercontent.com',
+                callback: (response) => {
+                    // Handle sign-in response
+                    this.handleSignInResponse(response);
                 }
             });
 
-            await gapi.load('auth2:client', () => {
-                gapi.client.init({
-                    apiKey: 'AIzaSyDxBTHWVk1vXAlhpZF3N2ueBvVFUFqhJds',
-                    clientId: '172233323706-0089j5fuie81o8abd5lt64togifdoefc.apps.googleusercontent.com',
-                    discoveryDocs: ['https://sheets.googleapis.com/$discovery/rest?version=v4'],
-                    scope: 'https://www.googleapis.com/auth/spreadsheets'
-                }).then(() => {
-                    this.isGoogleApiLoaded = true;
-                    const authInstance = gapi.auth2.getAuthInstance();
-                    this.isSignedIn = authInstance.isSignedIn.get();
-                    this.updateAuthStatus();
-                }).catch(error => {
-                    console.log('Google API initialization failed:', error);
-                    // Force redeployment with updated credentials
-                });
-            });
+            this.isGoogleApiLoaded = true;
+            this.updateAuthStatus();
+            console.log('✅ Google API and Identity Services initialized successfully');
+
         } catch (error) {
-            console.log('Failed to load Google API:', error);
+            console.error('❌ Failed to load Google API:', error);
         }
     }
 
@@ -362,23 +376,36 @@ class TimeClockApp {
             return;
         }
 
-        const authInstance = gapi.auth2.getAuthInstance();
         if (this.isSignedIn) {
-            authInstance.signOut().then(() => {
-                this.isSignedIn = false;
-                this.updateAuthStatus();
-                this.showNotification('Signed out from Google Sheets', 'info');
-            });
+            // Sign out
+            google.accounts.id.disableAutoSelect();
+            this.isSignedIn = false;
+            this.accessToken = null;
+            this.updateAuthStatus();
+            this.showNotification('Signed out from Google Sheets', 'info');
         } else {
-            authInstance.signIn().then(() => {
-                this.isSignedIn = true;
-                this.updateAuthStatus();
-                this.showNotification('Successfully connected to Google Sheets!', 'success');
-            }).catch(error => {
-                console.error('Google Sign-in failed:', error);
-                this.showNotification('Failed to connect to Google Sheets', 'error');
+            // Sign in - request access token for Sheets API
+            const client = google.accounts.oauth2.initTokenClient({
+                client_id: '172233323706-0089j5fuie81o8abd5lt64togifdoefc.apps.googleusercontent.com',
+                scope: 'https://www.googleapis.com/auth/spreadsheets',
+                callback: (response) => {
+                    if (response.access_token) {
+                        this.accessToken = response.access_token;
+                        this.isSignedIn = true;
+                        this.updateAuthStatus();
+                        this.showNotification('Successfully connected to Google Sheets!', 'success');
+                    } else {
+                        this.showNotification('Failed to get access token', 'error');
+                    }
+                },
             });
+            client.requestAccessToken();
         }
+    }
+
+    handleSignInResponse(response) {
+        // Handle the ID token response from Google Identity Services
+        console.log('Google Identity response:', response);
     }
 
     updateAuthStatus() {
@@ -398,7 +425,7 @@ class TimeClockApp {
     }
 
     async syncToGoogleSheets() {
-        if (!this.isSignedIn) {
+        if (!this.isSignedIn || !this.accessToken) {
             this.showNotification('Please connect to Google Sheets first', 'error');
             return;
         }
@@ -422,6 +449,11 @@ class TimeClockApp {
                     record.notes || ''
                 ])
             ];
+
+            // Set the access token for gapi
+            gapi.client.setToken({
+                access_token: this.accessToken
+            });
 
             const response = await gapi.client.sheets.spreadsheets.values.update({
                 spreadsheetId: spreadsheetId,
