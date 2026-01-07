@@ -106,12 +106,16 @@ class TimeClockApp {
             date: now.toISOString().split('T')[0],
             clockInTime: now.toISOString(),
             clockOutTime: null,
-            notes: ''
+            notes: '',
+            sheetsRowNumber: null
         };
         
         localStorage.setItem('currentSession', JSON.stringify(this.currentSession));
         this.updateClockStatus(true);
         this.showNotification('Clocked in successfully!', 'success');
+        
+        // Auto-sync to Google Sheets
+        this.autoSyncToSheets('clockIn', this.currentSession);
     }
 
     clockOut() {
@@ -120,15 +124,18 @@ class TimeClockApp {
         const now = new Date();
         this.currentSession.clockOutTime = now.toISOString();
         
-        // Add to records
-        this.records.push({ ...this.currentSession });
-        localStorage.setItem('timeClockRecords', JSON.stringify(this.records));
-        localStorage.removeItem('currentSession');
-        
         const duration = this.calculateDuration(
             new Date(this.currentSession.clockInTime),
             new Date(this.currentSession.clockOutTime)
         );
+        
+        // Auto-sync to Google Sheets before completing
+        this.autoSyncToSheets('clockOut', this.currentSession);
+        
+        // Add to records
+        this.records.push({ ...this.currentSession });
+        localStorage.setItem('timeClockRecords', JSON.stringify(this.records));
+        localStorage.removeItem('currentSession');
         
         this.currentSession = null;
         this.updateClockStatus(false);
@@ -160,11 +167,15 @@ class TimeClockApp {
             date: date,
             clockInTime: timeInDate.toISOString(),
             clockOutTime: timeOutDate.toISOString(),
-            notes: notes
+            notes: notes,
+            sheetsRowNumber: null
         };
 
         this.records.push(entry);
         localStorage.setItem('timeClockRecords', JSON.stringify(this.records));
+        
+        // Auto-sync complete entry to Google Sheets
+        this.autoSyncToSheets('manualEntry', entry);
         
         // Clear form
         document.getElementById('manualTimeIn').value = '';
@@ -430,6 +441,157 @@ class TimeClockApp {
         
         // If no match found, return null
         return null;
+    }
+
+    async autoSyncToSheets(action, record) {
+        // Check if auto-sync is enabled
+        const autoSyncEnabled = document.getElementById('autoSyncEnabled').checked;
+        if (!autoSyncEnabled || !this.isSignedIn || !this.accessToken) {
+            return;
+        }
+
+        const spreadsheetUrl = document.getElementById('spreadsheetUrl').value;
+        const spreadsheetId = this.extractSpreadsheetId(spreadsheetUrl);
+        if (!spreadsheetId) {
+            return;
+        }
+
+        try {
+            // Set the access token for gapi
+            gapi.client.setToken({
+                access_token: this.accessToken
+            });
+
+            if (action === 'clockIn') {
+                await this.appendClockInToSheets(spreadsheetId, record);
+            } else if (action === 'clockOut') {
+                await this.updateClockOutInSheets(spreadsheetId, record);
+            } else if (action === 'manualEntry') {
+                await this.appendCompleteRowToSheets(spreadsheetId, record);
+            }
+        } catch (error) {
+            console.error('Auto-sync failed:', error);
+            // Don't show error notification for auto-sync failures to avoid interrupting workflow
+        }
+    }
+
+    async ensureHeaders(spreadsheetId) {
+        try {
+            // Check if headers exist
+            const response = await gapi.client.sheets.spreadsheets.values.get({
+                spreadsheetId: spreadsheetId,
+                range: 'A1:E1'
+            });
+
+            const values = response.result.values;
+            if (!values || values.length === 0 || !values[0] || values[0].length === 0) {
+                // Add headers if they don't exist
+                await gapi.client.sheets.spreadsheets.values.update({
+                    spreadsheetId: spreadsheetId,
+                    range: 'A1:E1',
+                    valueInputOption: 'RAW',
+                    resource: {
+                        values: [['Date', 'Clock In', 'Clock Out', 'Duration (Hours)', 'Notes']]
+                    }
+                });
+                console.log('✅ Added headers to Google Sheet');
+            }
+        } catch (error) {
+            console.log('Could not add headers:', error);
+        }
+    }
+
+    async appendClockInToSheets(spreadsheetId, record) {
+        // Ensure headers exist
+        await this.ensureHeaders(spreadsheetId);
+
+        const clockInTime = new Date(record.clockInTime);
+        const data = [
+            record.date,
+            clockInTime.toLocaleTimeString(),
+            '', // Clock out time (empty for now)
+            '', // Duration (empty for now)
+            record.notes || ''
+        ];
+
+        // Find the first empty row or append after existing data
+        const response = await gapi.client.sheets.spreadsheets.values.append({
+            spreadsheetId: spreadsheetId,
+            range: 'A:E',
+            valueInputOption: 'RAW',
+            insertDataOption: 'INSERT_ROWS',
+            resource: {
+                values: [data]
+            }
+        });
+
+        // Store the row number for later update when clocking out
+        const range = response.result.updates.updatedRange;
+        const rowMatch = range.match(/A(\d+):E\d+/);
+        if (rowMatch) {
+            record.sheetsRowNumber = parseInt(rowMatch[1]);
+            // Update local storage with row number
+            localStorage.setItem('currentSession', JSON.stringify(record));
+        }
+
+        console.log('✅ Auto-synced clock-in to Google Sheets');
+    }
+
+    async updateClockOutInSheets(spreadsheetId, record) {
+        if (!record.sheetsRowNumber) {
+            // If no row number stored, append as new row
+            await this.appendCompleteRowToSheets(spreadsheetId, record);
+            return;
+        }
+
+        const clockOutTime = new Date(record.clockOutTime);
+        const duration = this.calculateHours(
+            new Date(record.clockInTime),
+            new Date(record.clockOutTime)
+        ).toFixed(2);
+
+        // Update only the clock out time and duration columns
+        await gapi.client.sheets.spreadsheets.values.update({
+            spreadsheetId: spreadsheetId,
+            range: `C${record.sheetsRowNumber}:D${record.sheetsRowNumber}`,
+            valueInputOption: 'RAW',
+            resource: {
+                values: [[
+                    clockOutTime.toLocaleTimeString(),
+                    duration
+                ]]
+            }
+        });
+
+        console.log('✅ Auto-synced clock-out to Google Sheets');
+    }
+
+    async appendCompleteRowToSheets(spreadsheetId, record) {
+        const clockInTime = new Date(record.clockInTime);
+        const clockOutTime = record.clockOutTime ? new Date(record.clockOutTime) : null;
+        const duration = clockOutTime ? 
+            this.calculateHours(clockInTime, clockOutTime).toFixed(2) : 
+            'In Progress';
+
+        const data = [
+            record.date,
+            clockInTime.toLocaleTimeString(),
+            clockOutTime ? clockOutTime.toLocaleTimeString() : 'In Progress',
+            duration,
+            record.notes || ''
+        ];
+
+        await gapi.client.sheets.spreadsheets.values.append({
+            spreadsheetId: spreadsheetId,
+            range: 'A:E',
+            valueInputOption: 'RAW',
+            insertDataOption: 'INSERT_ROWS',
+            resource: {
+                values: [data]
+            }
+        });
+
+        console.log('✅ Auto-synced complete record to Google Sheets');
     }
 
     updateAuthStatus() {
