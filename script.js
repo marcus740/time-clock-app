@@ -52,6 +52,7 @@ class TimeClockApp {
                     this.updateAuthStatus();
                 }).catch(error => {
                     console.log('Google API initialization failed:', error);
+                    // Force redeployment with updated credentials
                 });
             });
         } catch (error) {
