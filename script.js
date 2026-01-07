@@ -41,8 +41,8 @@ class TimeClockApp {
 
             await gapi.load('auth2:client', () => {
                 gapi.client.init({
-                    apiKey: 'YOUR_API_KEY', // Replace with your actual API key
-                    clientId: 'YOUR_CLIENT_ID.apps.googleusercontent.com', // Replace with your client ID
+                    apiKey: 'AIzaSyDxBTHWVk1vXAlhpZF3N2ueBvVFUFqhJds',
+                    clientId: '172233323706-0089j5fuie81o8abd5lt64togifdoefc.apps.googleusercontent.com',
                     discoveryDocs: ['https://sheets.googleapis.com/$discovery/rest?version=v4'],
                     scope: 'https://www.googleapis.com/auth/spreadsheets'
                 }).then(() => {
