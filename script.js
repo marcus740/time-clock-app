@@ -408,6 +408,30 @@ class TimeClockApp {
         console.log('Google Identity response:', response);
     }
 
+    extractSpreadsheetId(url) {
+        // Extract spreadsheet ID from various Google Sheets URL formats
+        if (!url) return null;
+        
+        // Handle different URL formats:
+        // https://docs.google.com/spreadsheets/d/SPREADSHEET_ID/edit
+        // https://docs.google.com/spreadsheets/d/SPREADSHEET_ID/edit#gid=0
+        // Just the ID itself
+        
+        // If it's already just an ID (no slashes), return as-is
+        if (!url.includes('/')) {
+            return url.trim();
+        }
+        
+        // Extract from full URL
+        const match = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+        if (match) {
+            return match[1];
+        }
+        
+        // If no match found, return null
+        return null;
+    }
+
     updateAuthStatus() {
         const indicator = document.getElementById('authIndicator');
         const status = document.getElementById('authStatus');
@@ -430,11 +454,19 @@ class TimeClockApp {
             return;
         }
 
-        const spreadsheetId = document.getElementById('spreadsheetId').value;
-        if (!spreadsheetId) {
-            this.showNotification('Please enter a Spreadsheet ID', 'error');
+        const spreadsheetUrl = document.getElementById('spreadsheetUrl').value;
+        if (!spreadsheetUrl) {
+            this.showNotification('Please enter your Google Sheets URL', 'error');
             return;
         }
+
+        const spreadsheetId = this.extractSpreadsheetId(spreadsheetUrl);
+        if (!spreadsheetId) {
+            this.showNotification('Invalid Google Sheets URL. Please paste a valid Google Sheets link.', 'error');
+            return;
+        }
+
+        console.log('Extracted Spreadsheet ID:', spreadsheetId);
 
         try {
             const data = [
