@@ -333,6 +333,17 @@
         </div>
 
         <div class="main-content">
+            <!-- System Status Panel -->
+            <div style="background: #e3f2fd; padding: 15px; border-radius: 8px; margin-bottom: 20px; font-size: 0.9em; border: 2px solid #90caf9;">
+                <div style="font-weight: bold; margin-bottom: 10px; color: #1976d2;">📊 System Status</div>
+                <div id="systemStatus" style="color: #424242; display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                    <div>📝 Records stored: <strong id="recordsCount">0</strong></div>
+                    <div>⏱️ Active session: <strong id="activeSessionStatus">None</strong></div>
+                    <div>☁️ Google Sheets: <strong id="googleSheetsStatus">Not connected</strong></div>
+                    <div>🔄 Auto-sync: <strong id="autoSyncStatus">Disabled</strong></div>
+                </div>
+            </div>
+
             <!-- Time Clock Section -->
             <div class="time-clock-section">
                 <div class="clock-status" id="clockStatus">

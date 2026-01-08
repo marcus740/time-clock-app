@@ -4,10 +4,20 @@ class TimeClockApp {
         this.isGoogleApiLoaded = false;
         this.isSignedIn = false;
         this.currentSession = null;
-        this.records = JSON.parse(localStorage.getItem('timeClockRecords') || '[]');
-        
+
+        // Load records with error handling
+        try {
+            this.records = JSON.parse(localStorage.getItem('timeClockRecords') || '[]');
+            console.log(`✅ Loaded ${this.records.length} time records from storage`);
+        } catch (error) {
+            console.error('❌ Error loading records, starting fresh:', error);
+            this.records = [];
+            localStorage.setItem('timeClockRecords', '[]');
+        }
+
         this.init();
         this.updateDisplay();
+        this.updateSystemStatus();
         this.startClock();
     }
 
@@ -21,11 +31,26 @@ class TimeClockApp {
         // Load Google API
         this.loadGoogleAPI();
         
-        // Check if currently clocked in
-        const session = JSON.parse(localStorage.getItem('currentSession') || 'null');
-        if (session && session.clockInTime && !session.clockOutTime) {
-            this.currentSession = session;
-            this.updateClockStatus(true);
+        // Check if currently clocked in and restore session
+        try {
+            const session = JSON.parse(localStorage.getItem('currentSession') || 'null');
+            if (session && session.clockInTime && !session.clockOutTime) {
+                this.currentSession = session;
+                this.updateClockStatus(true);
+
+                const clockInTime = new Date(session.clockInTime);
+                const elapsed = Math.floor((new Date() - clockInTime) / 1000 / 60);
+                console.log(`✅ Restored active session - Clocked in ${elapsed} minutes ago`);
+                console.log('Session details:', {
+                    clockInTime: clockInTime.toLocaleString(),
+                    sheetsRowNumber: session.sheetsRowNumber || 'Not synced'
+                });
+            } else {
+                console.log('ℹ️ No active session to restore');
+            }
+        } catch (error) {
+            console.error('❌ Error restoring session:', error);
+            localStorage.removeItem('currentSession');
         }
 
         // Apply default filter
@@ -33,6 +58,75 @@ class TimeClockApp {
 
         // Set up event listeners for persistent settings
         this.setupSettingsListeners();
+
+        // Set up localStorage monitoring and backup
+        this.setupStorageProtection();
+    }
+
+    setupStorageProtection() {
+        // Periodically backup data to prevent loss
+        setInterval(() => {
+            this.backupData();
+        }, 60000); // Every minute
+
+        // Listen for storage events (e.g., if cleared from another tab)
+        window.addEventListener('storage', (e) => {
+            if (e.key === 'timeClockRecords' && !e.newValue) {
+                console.warn('⚠️ Records were cleared from storage - attempting to restore from backup');
+                this.restoreFromBackup();
+            }
+        });
+
+        // Warn before leaving if clocked in
+        window.addEventListener('beforeunload', (e) => {
+            if (this.currentSession && this.currentSession.clockInTime && !this.currentSession.clockOutTime) {
+                const message = 'You are currently clocked in. Your session will be saved.';
+                e.returnValue = message;
+
+                // Ensure session is saved before leaving
+                localStorage.setItem('currentSession', JSON.stringify(this.currentSession));
+                return message;
+            }
+        });
+    }
+
+    backupData() {
+        try {
+            // Create backup of records
+            if (this.records && this.records.length > 0) {
+                localStorage.setItem('timeClockRecords_backup', JSON.stringify(this.records));
+            }
+
+            // Backup current session if exists
+            if (this.currentSession) {
+                localStorage.setItem('currentSession_backup', JSON.stringify(this.currentSession));
+            }
+        } catch (error) {
+            console.error('Error creating backup:', error);
+        }
+    }
+
+    restoreFromBackup() {
+        try {
+            const backupRecords = localStorage.getItem('timeClockRecords_backup');
+            if (backupRecords) {
+                this.records = JSON.parse(backupRecords);
+                localStorage.setItem('timeClockRecords', backupRecords);
+                this.updateDisplay();
+                this.showNotification('Data restored from backup', 'info');
+                console.log('✅ Restored records from backup');
+            }
+
+            const backupSession = localStorage.getItem('currentSession_backup');
+            if (backupSession && !this.currentSession) {
+                this.currentSession = JSON.parse(backupSession);
+                localStorage.setItem('currentSession', backupSession);
+                this.updateClockStatus(true);
+                console.log('✅ Restored session from backup');
+            }
+        } catch (error) {
+            console.error('Error restoring from backup:', error);
+        }
     }
 
     setupSettingsListeners() {
@@ -197,6 +291,11 @@ class TimeClockApp {
                 this.updateSessionInfo();
             }
         }, 1000);
+
+        // Update system status every 10 seconds
+        setInterval(() => {
+            this.updateSystemStatus();
+        }, 10000);
     }
 
     updateCurrentTime() {
@@ -325,6 +424,41 @@ class TimeClockApp {
     updateDisplay() {
         this.updateSummaryCards();
         this.updateRecordsTable();
+        this.updateSystemStatus();
+    }
+
+    updateSystemStatus() {
+        // Update records count
+        document.getElementById('recordsCount').textContent = this.records.length;
+
+        // Update active session status
+        if (this.currentSession && this.currentSession.clockInTime && !this.currentSession.clockOutTime) {
+            const clockInTime = new Date(this.currentSession.clockInTime);
+            const elapsed = Math.floor((new Date() - clockInTime) / 1000 / 60);
+            document.getElementById('activeSessionStatus').innerHTML = `<span style="color: #28a745;">Clocked in (${elapsed}m ago)</span>`;
+        } else {
+            document.getElementById('activeSessionStatus').textContent = 'None';
+        }
+
+        // Update Google Sheets status
+        const spreadsheetUrl = document.getElementById('spreadsheetUrl').value;
+        if (this.isSignedIn && spreadsheetUrl) {
+            document.getElementById('googleSheetsStatus').innerHTML = '<span style="color: #28a745;">Connected ✓</span>';
+        } else if (spreadsheetUrl && !this.isSignedIn) {
+            document.getElementById('googleSheetsStatus').innerHTML = '<span style="color: #f59e0b;">URL saved, not connected</span>';
+        } else {
+            document.getElementById('googleSheetsStatus').innerHTML = '<span style="color: #dc3545;">Not connected</span>';
+        }
+
+        // Update auto-sync status
+        const autoSyncEnabled = document.getElementById('autoSyncEnabled').checked;
+        if (autoSyncEnabled && this.isSignedIn && spreadsheetUrl) {
+            document.getElementById('autoSyncStatus').innerHTML = '<span style="color: #28a745;">Active ✓</span>';
+        } else if (autoSyncEnabled) {
+            document.getElementById('autoSyncStatus').innerHTML = '<span style="color: #f59e0b;">Enabled (not connected)</span>';
+        } else {
+            document.getElementById('autoSyncStatus').textContent = 'Disabled';
+        }
     }
 
     updateSummaryCards() {
@@ -521,6 +655,7 @@ class TimeClockApp {
                         this.accessToken = response.access_token;
                         this.isSignedIn = true;
                         this.updateAuthStatus();
+                        this.updateSystemStatus();
                         this.saveGoogleSheetsSettings();
                         this.showNotification('Successfully connected to Google Sheets!', 'success');
                     } else {
