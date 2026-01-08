@@ -801,20 +801,23 @@ class TimeClockApp {
         const duration = this.calculateHours(
             new Date(record.clockInTime),
             new Date(record.clockOutTime)
-        ).toFixed(2);
+        );
 
-        // Update only the clock out time and duration columns
+        // Update only the clock out time and duration columns (duration as NUMBER)
         await gapi.client.sheets.spreadsheets.values.update({
             spreadsheetId: spreadsheetId,
             range: `C${record.sheetsRowNumber}:D${record.sheetsRowNumber}`,
-            valueInputOption: 'RAW',
+            valueInputOption: 'USER_ENTERED', // Changed from RAW to interpret numbers correctly
             resource: {
                 values: [[
                     clockOutTime.toLocaleTimeString(),
-                    duration
+                    duration // Send as number, not string
                 ]]
             }
         });
+
+        // Update the SUM formula after adding data
+        await this.updateSumFormula(spreadsheetId);
 
         console.log('✅ Auto-synced clock-out to Google Sheets');
     }
@@ -822,29 +825,72 @@ class TimeClockApp {
     async appendCompleteRowToSheets(spreadsheetId, record) {
         const clockInTime = new Date(record.clockInTime);
         const clockOutTime = record.clockOutTime ? new Date(record.clockOutTime) : null;
-        const duration = clockOutTime ? 
-            this.calculateHours(clockInTime, clockOutTime).toFixed(2) : 
+        const duration = clockOutTime ?
+            this.calculateHours(clockInTime, clockOutTime) : // Send as number
             'In Progress';
 
         const data = [
             record.date,
             clockInTime.toLocaleTimeString(),
             clockOutTime ? clockOutTime.toLocaleTimeString() : 'In Progress',
-            duration,
+            duration, // This will be a number now
             record.notes || ''
         ];
 
         await gapi.client.sheets.spreadsheets.values.append({
             spreadsheetId: spreadsheetId,
             range: 'A:E',
-            valueInputOption: 'RAW',
+            valueInputOption: 'USER_ENTERED', // Changed from RAW to interpret numbers correctly
             insertDataOption: 'INSERT_ROWS',
             resource: {
                 values: [data]
             }
         });
 
+        // Update the SUM formula after adding data
+        await this.updateSumFormula(spreadsheetId);
+
         console.log('✅ Auto-synced complete record to Google Sheets');
+    }
+
+    async updateSumFormula(spreadsheetId) {
+        try {
+            // Get the current data to find the last row with data
+            const response = await gapi.client.sheets.spreadsheets.values.get({
+                spreadsheetId: spreadsheetId,
+                range: 'A:E'
+            });
+
+            const values = response.result.values;
+            if (!values || values.length < 2) return; // No data rows besides header
+
+            const lastDataRow = values.length;
+            const sumRow = lastDataRow + 1;
+
+            // Create SUM formula for the duration column (column D)
+            // Skip header row (row 1), sum from row 2 to last data row
+            const sumFormula = `=SUM(D2:D${lastDataRow})`;
+
+            // Clear any existing formulas below the data first
+            await gapi.client.sheets.spreadsheets.values.clear({
+                spreadsheetId: spreadsheetId,
+                range: `D${sumRow}:D${sumRow + 10}` // Clear next 10 rows to remove old formulas
+            });
+
+            // Add the SUM formula with label
+            await gapi.client.sheets.spreadsheets.values.update({
+                spreadsheetId: spreadsheetId,
+                range: `C${sumRow}:D${sumRow}`,
+                valueInputOption: 'USER_ENTERED',
+                resource: {
+                    values: [['Total Hours:', sumFormula]]
+                }
+            });
+
+            console.log(`✅ Updated SUM formula at row ${sumRow}`);
+        } catch (error) {
+            console.error('Error updating SUM formula:', error);
+        }
     }
 
     updateAuthStatus() {
