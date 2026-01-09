@@ -897,20 +897,32 @@ class TimeClockApp {
             const values = response.result.values;
             if (!values || values.length < 2) return; // No data rows besides header
 
-            const lastDataRow = values.length;
+            // Find the last row that contains actual time entry data (not the sum formula)
+            let lastDataRow = values.length;
+
+            // Check if the last row(s) contain "Total Hours:" label - if so, they're formula rows
+            while (lastDataRow > 1 && values[lastDataRow - 1] &&
+                   (values[lastDataRow - 1][2] === 'Total Hours:' ||
+                    !values[lastDataRow - 1][0])) { // Check column C or if column A is empty
+                lastDataRow--;
+            }
+
             const sumRow = lastDataRow + 1;
 
             // Create SUM formula for the duration column (column D)
             // Skip header row (row 1), sum from row 2 to last data row
             const sumFormula = `=SUM(D2:D${lastDataRow})`;
 
-            // Clear any existing formulas below the data first
+            console.log(`📊 Moving SUM formula to row ${sumRow} (last data row: ${lastDataRow})`);
+
+            // Clear any existing formulas and labels below the data (clear a large range to be safe)
+            // Clear from current sum position down to 50 rows below
             await gapi.client.sheets.spreadsheets.values.clear({
                 spreadsheetId: spreadsheetId,
-                range: `D${sumRow}:D${sumRow + 10}` // Clear next 10 rows to remove old formulas
+                range: `C${lastDataRow + 1}:D${lastDataRow + 51}` // Clear both label and formula columns
             });
 
-            // Add the SUM formula with label
+            // Add the SUM formula with label at the new position
             await gapi.client.sheets.spreadsheets.values.update({
                 spreadsheetId: spreadsheetId,
                 range: `C${sumRow}:D${sumRow}`,
