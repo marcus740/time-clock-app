@@ -1039,15 +1039,18 @@ class TimeClockApp {
         const indicator = document.getElementById('authIndicator');
         const status = document.getElementById('authStatus');
         const authBtn = document.getElementById('authBtn');
+        const syncFromBtn = document.getElementById('syncFromSheetsBtn');
 
         if (this.isSignedIn) {
             indicator.className = 'auth-indicator connected';
             status.textContent = 'Connected to Google Sheets';
             authBtn.textContent = 'Disconnect from Google Sheets';
+            if (syncFromBtn) syncFromBtn.disabled = false;
         } else {
             indicator.className = 'auth-indicator disconnected';
             status.textContent = 'Not connected to Google Sheets';
             authBtn.textContent = 'Connect to Google Sheets';
+            if (syncFromBtn) syncFromBtn.disabled = true;
         }
     }
 
@@ -1103,6 +1106,127 @@ class TimeClockApp {
         } catch (error) {
             console.error('Google Sheets sync failed:', error);
             this.showNotification('Failed to sync with Google Sheets. Check your Spreadsheet ID.', 'error');
+        }
+    }
+
+    async syncFromGoogleSheets() {
+        if (!this.isSignedIn || !this.accessToken) {
+            this.showNotification('Please connect to Google Sheets first', 'error');
+            return;
+        }
+
+        const spreadsheetUrl = document.getElementById('spreadsheetUrl').value;
+        if (!spreadsheetUrl) {
+            this.showNotification('Please enter your Google Sheets URL', 'error');
+            return;
+        }
+
+        const spreadsheetId = this.extractSpreadsheetId(spreadsheetUrl);
+        if (!spreadsheetId) {
+            this.showNotification('Invalid Google Sheets URL', 'error');
+            return;
+        }
+
+        try {
+            // Set the access token for gapi
+            gapi.client.setToken({
+                access_token: this.accessToken
+            });
+
+            console.log('📥 Loading data from Google Sheets...');
+
+            // Get all data from sheets (skip header row)
+            const response = await gapi.client.sheets.spreadsheets.values.get({
+                spreadsheetId: spreadsheetId,
+                range: 'A2:E' // Start from row 2 to skip headers, read until end
+            });
+
+            const values = response.result.values;
+            if (!values || values.length === 0) {
+                this.showNotification('No data found in Google Sheets', 'info');
+                return;
+            }
+
+            console.log(`📊 Found ${values.length} rows in Google Sheets`);
+
+            // Parse the data into record objects
+            const importedRecords = [];
+            for (const row of values) {
+                // Skip rows that are the SUM formula
+                if (row[2] === 'Total Hours:') continue;
+
+                // Skip rows without date or clock in time
+                if (!row[0] || !row[1]) continue;
+
+                try {
+                    const date = row[0]; // Date
+                    const clockInTimeStr = row[1]; // Clock In time
+                    const clockOutTimeStr = row[2]; // Clock Out time
+                    const notes = row[4] || ''; // Notes
+
+                    // Parse the times - combine date with time strings
+                    const clockInTime = new Date(`${date} ${clockInTimeStr}`);
+                    const clockOutTime = (clockOutTimeStr && clockOutTimeStr !== 'In Progress' && clockOutTimeStr !== '')
+                        ? new Date(`${date} ${clockOutTimeStr}`)
+                        : null;
+
+                    // Create record object
+                    const record = {
+                        id: clockInTime.getTime(), // Use timestamp as ID
+                        date: date,
+                        clockInTime: clockInTime.toISOString(),
+                        clockOutTime: clockOutTime ? clockOutTime.toISOString() : null,
+                        notes: notes,
+                        sheetsRowNumber: null // Will be set on next sync
+                    };
+
+                    importedRecords.push(record);
+                } catch (error) {
+                    console.warn('Could not parse row:', row, error);
+                }
+            }
+
+            console.log(`✅ Parsed ${importedRecords.length} valid records`);
+
+            // Merge with existing local records (avoid duplicates)
+            const mergedRecords = [...this.records];
+            let newRecordsCount = 0;
+            let updatedRecordsCount = 0;
+
+            for (const importedRecord of importedRecords) {
+                // Find if record already exists locally (match by date + clockInTime)
+                const existingIndex = mergedRecords.findIndex(r =>
+                    r.date === importedRecord.date &&
+                    new Date(r.clockInTime).getTime() === new Date(importedRecord.clockInTime).getTime()
+                );
+
+                if (existingIndex >= 0) {
+                    // Update existing record if it has more complete data
+                    if (importedRecord.clockOutTime && !mergedRecords[existingIndex].clockOutTime) {
+                        mergedRecords[existingIndex] = importedRecord;
+                        updatedRecordsCount++;
+                    }
+                } else {
+                    // Add new record
+                    mergedRecords.push(importedRecord);
+                    newRecordsCount++;
+                }
+            }
+
+            // Update app state
+            this.records = mergedRecords;
+            localStorage.setItem('timeClockRecords', JSON.stringify(this.records));
+            this.updateDisplay();
+
+            console.log(`📥 Sync complete: ${newRecordsCount} new, ${updatedRecordsCount} updated`);
+            this.showNotification(
+                `Loaded ${newRecordsCount} new record(s) and updated ${updatedRecordsCount} existing record(s) from Google Sheets`,
+                'success'
+            );
+
+        } catch (error) {
+            console.error('Failed to load from Google Sheets:', error);
+            this.showNotification('Failed to load data from Google Sheets', 'error');
         }
     }
 
@@ -1205,6 +1329,10 @@ function handleGoogleAuth() {
 
 function syncToGoogleSheets() {
     timeClockApp.syncToGoogleSheets();
+}
+
+function syncFromGoogleSheets() {
+    timeClockApp.syncFromGoogleSheets();
 }
 
 function exportToExcel() {
