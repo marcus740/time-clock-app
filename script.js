@@ -314,7 +314,7 @@ class TimeClockApp {
             `Clocked in since: ${clockInTime.toLocaleTimeString()}<br>Current session: ${duration}`;
     }
 
-    clockIn() {
+    async clockIn() {
         const now = new Date();
         this.currentSession = {
             id: Date.now(),
@@ -324,34 +324,48 @@ class TimeClockApp {
             notes: '',
             sheetsRowNumber: null
         };
-        
+
         localStorage.setItem('currentSession', JSON.stringify(this.currentSession));
         this.updateClockStatus(true);
         this.showNotification('Clocked in successfully!', 'success');
-        
-        // Auto-sync to Google Sheets
-        this.autoSyncToSheets('clockIn', this.currentSession);
+
+        console.log('🕐 Clocking in at:', now.toLocaleString());
+        console.log('📊 Row number before sync:', this.currentSession.sheetsRowNumber);
+
+        // Auto-sync to Google Sheets and wait for it to complete
+        await this.autoSyncToSheets('clockIn', this.currentSession);
+
+        console.log('📊 Row number after sync:', this.currentSession.sheetsRowNumber);
     }
 
-    clockOut() {
+    async clockOut() {
         if (!this.currentSession) return;
-        
+
         const now = new Date();
         this.currentSession.clockOutTime = now.toISOString();
-        
+
         const duration = this.calculateDuration(
             new Date(this.currentSession.clockInTime),
             new Date(this.currentSession.clockOutTime)
         );
-        
-        // Auto-sync to Google Sheets before completing
-        this.autoSyncToSheets('clockOut', this.currentSession);
-        
+
+        console.log('🕐 Clocking out at:', now.toLocaleString());
+        console.log('📊 Current session details:', {
+            id: this.currentSession.id,
+            clockInTime: new Date(this.currentSession.clockInTime).toLocaleString(),
+            clockOutTime: new Date(this.currentSession.clockOutTime).toLocaleString(),
+            sheetsRowNumber: this.currentSession.sheetsRowNumber,
+            date: this.currentSession.date
+        });
+
+        // Auto-sync to Google Sheets before completing and wait for it
+        await this.autoSyncToSheets('clockOut', this.currentSession);
+
         // Add to records
         this.records.push({ ...this.currentSession });
         localStorage.setItem('timeClockRecords', JSON.stringify(this.records));
         localStorage.removeItem('currentSession');
-        
+
         this.currentSession = null;
         this.updateClockStatus(false);
         this.updateDisplay();
@@ -782,16 +796,33 @@ class TimeClockApp {
         const range = response.result.updates.updatedRange;
         const rowMatch = range.match(/A(\d+):E\d+/);
         if (rowMatch) {
-            record.sheetsRowNumber = parseInt(rowMatch[1]);
+            const rowNumber = parseInt(rowMatch[1]);
+            record.sheetsRowNumber = rowNumber;
+
+            // CRITICAL: Update the main currentSession object as well
+            if (this.currentSession && this.currentSession.id === record.id) {
+                this.currentSession.sheetsRowNumber = rowNumber;
+            }
+
             // Update local storage with row number
             localStorage.setItem('currentSession', JSON.stringify(record));
-        }
 
-        console.log('✅ Auto-synced clock-in to Google Sheets');
+            console.log(`✅ Auto-synced clock-in to Google Sheets (Row ${rowNumber})`);
+        } else {
+            console.warn('⚠️ Could not extract row number from range:', range);
+        }
     }
 
     async updateClockOutInSheets(spreadsheetId, record) {
+        console.log('📝 Updating clock-out in Sheets. Row number:', record.sheetsRowNumber);
+
         if (!record.sheetsRowNumber) {
+            console.warn('⚠️ No row number found! Creating new row instead of updating existing one.');
+            console.log('Record details:', {
+                date: record.date,
+                clockInTime: new Date(record.clockInTime).toLocaleString(),
+                clockOutTime: new Date(record.clockOutTime).toLocaleString()
+            });
             // If no row number stored, append as new row
             await this.appendCompleteRowToSheets(spreadsheetId, record);
             return;
@@ -802,6 +833,8 @@ class TimeClockApp {
             new Date(record.clockInTime),
             new Date(record.clockOutTime)
         );
+
+        console.log(`✏️ Updating row ${record.sheetsRowNumber} with clock-out time and duration (${duration} hours)`);
 
         // Update only the clock out time and duration columns (duration as NUMBER)
         await gapi.client.sheets.spreadsheets.values.update({
@@ -819,7 +852,7 @@ class TimeClockApp {
         // Update the SUM formula after adding data
         await this.updateSumFormula(spreadsheetId);
 
-        console.log('✅ Auto-synced clock-out to Google Sheets');
+        console.log(`✅ Auto-synced clock-out to Google Sheets (Row ${record.sheetsRowNumber})`);
     }
 
     async appendCompleteRowToSheets(spreadsheetId, record) {
