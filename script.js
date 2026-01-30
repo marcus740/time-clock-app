@@ -805,65 +805,43 @@ class TimeClockApp {
             record.notes || ''
         ];
 
-        // Find if SUM formula exists
-        const sumRow = await this.findSumFormulaRow(spreadsheetId);
+        // Find the correct insertion position based on date order
+        const insertionRow = await this.findCorrectInsertionRow(spreadsheetId, record.date);
 
-        let targetRow;
-        let response;
+        console.log(`📊 Inserting new clock-in at row ${insertionRow} (date: ${record.date})`);
 
-        if (sumRow) {
-            // Insert a new row BEFORE the SUM formula
-            console.log(`📊 Inserting new row before SUM formula at row ${sumRow}`);
-
-            // Use batchUpdate to insert a dimension (row)
-            await gapi.client.sheets.spreadsheets.batchUpdate({
-                spreadsheetId: spreadsheetId,
-                resource: {
-                    requests: [{
-                        insertDimension: {
-                            range: {
-                                sheetId: 0,
-                                dimension: 'ROWS',
-                                startIndex: sumRow - 1,
-                                endIndex: sumRow
-                            },
-                            inheritFromBefore: false
-                        }
-                    }]
-                }
-            });
-
-            // Now write data to the newly inserted row
-            targetRow = sumRow;
-            await gapi.client.sheets.spreadsheets.values.update({
-                spreadsheetId: spreadsheetId,
-                range: `A${targetRow}:E${targetRow}`,
-                valueInputOption: 'RAW',
-                resource: {
-                    values: [data]
-                }
-            });
-        } else {
-            // No SUM formula exists yet, append normally
-            response = await gapi.client.sheets.spreadsheets.values.append({
-                spreadsheetId: spreadsheetId,
-                range: 'A:E',
-                valueInputOption: 'RAW',
-                insertDataOption: 'INSERT_ROWS',
-                resource: {
-                    values: [data]
-                }
-            });
-
-            const range = response.result.updates.updatedRange;
-            const rowMatch = range.match(/A(\d+):E\d+/);
-            if (rowMatch) {
-                targetRow = parseInt(rowMatch[1]);
+        // Insert a new row at the correct position
+        await gapi.client.sheets.spreadsheets.batchUpdate({
+            spreadsheetId: spreadsheetId,
+            resource: {
+                requests: [{
+                    insertDimension: {
+                        range: {
+                            sheetId: 0,
+                            dimension: 'ROWS',
+                            startIndex: insertionRow - 1,
+                            endIndex: insertionRow
+                        },
+                        inheritFromBefore: false
+                    }
+                }]
             }
+        });
 
-            // Create initial SUM formula
-            await this.updateSumFormula(spreadsheetId);
-        }
+        // Write data to the newly inserted row
+        await gapi.client.sheets.spreadsheets.values.update({
+            spreadsheetId: spreadsheetId,
+            range: `A${insertionRow}:E${insertionRow}`,
+            valueInputOption: 'USER_ENTERED',
+            resource: {
+                values: [data]
+            }
+        });
+
+        const targetRow = insertionRow;
+
+        // Update SUM formula to include the new row
+        await this.updateSumFormula(spreadsheetId);
 
         // Store the row number for later update when clocking out
         if (targetRow) {
@@ -904,22 +882,27 @@ class TimeClockApp {
             new Date(record.clockOutTime)
         );
 
-        console.log(`✏️ Updating row ${record.sheetsRowNumber} with clock-out time and duration (${duration} hours)`);
+        // Round duration to 2 decimal places (hundredths)
+        const roundedDuration = Math.round(duration * 100) / 100;
+
+        console.log(`✏️ Updating row ${record.sheetsRowNumber} with clock-out time and duration (${roundedDuration} hours)`);
 
         // Update only the clock out time and duration columns (duration as NUMBER)
         await gapi.client.sheets.spreadsheets.values.update({
             spreadsheetId: spreadsheetId,
             range: `C${record.sheetsRowNumber}:D${record.sheetsRowNumber}`,
-            valueInputOption: 'USER_ENTERED', // Changed from RAW to interpret numbers correctly
+            valueInputOption: 'USER_ENTERED', // Interprets numbers correctly
             resource: {
                 values: [[
                     clockOutTime.toLocaleTimeString(),
-                    duration // Send as number, not string
+                    Number(roundedDuration) // Explicitly cast to Number to ensure it's not a string
                 ]]
             }
         });
 
-        // Note: No need to update SUM formula - it automatically adjusts its range when rows are inserted
+        console.log('🔄 Calling updateSumFormula after clock-out...');
+        // Update SUM formula to account for new clocking log and pay period changes
+        await this.updateSumFormula(spreadsheetId);
 
         console.log(`✅ Auto-synced clock-out to Google Sheets (Row ${record.sheetsRowNumber})`);
     }
@@ -928,77 +911,220 @@ class TimeClockApp {
         const clockInTime = new Date(record.clockInTime);
         const clockOutTime = record.clockOutTime ? new Date(record.clockOutTime) : null;
         const duration = clockOutTime ?
-            this.calculateHours(clockInTime, clockOutTime) : // Send as number
+            Number(Math.round(this.calculateHours(clockInTime, clockOutTime) * 100) / 100) : // Round to 2 decimal places and cast to Number
             'In Progress';
 
         const data = [
             record.date,
             clockInTime.toLocaleTimeString(),
             clockOutTime ? clockOutTime.toLocaleTimeString() : 'In Progress',
-            duration, // This will be a number now
+            duration, // This will be a number rounded to 2 decimal places (or 'In Progress' string)
             record.notes || ''
         ];
 
-        // Find if SUM formula exists
-        const sumRow = await this.findSumFormulaRow(spreadsheetId);
+        // Find the correct insertion position based on date order
+        const insertionRow = await this.findCorrectInsertionRow(spreadsheetId, record.date);
 
-        if (sumRow) {
-            // Insert a new row BEFORE the SUM formula
-            console.log(`📊 Inserting complete record before SUM formula at row ${sumRow}`);
+        console.log(`📊 Inserting complete record at row ${insertionRow} (date: ${record.date})`);
 
-            // Use batchUpdate to insert a dimension (row)
-            await gapi.client.sheets.spreadsheets.batchUpdate({
-                spreadsheetId: spreadsheetId,
-                resource: {
-                    requests: [{
-                        insertDimension: {
-                            range: {
-                                sheetId: 0,
-                                dimension: 'ROWS',
-                                startIndex: sumRow - 1,
-                                endIndex: sumRow
-                            },
-                            inheritFromBefore: false
-                        }
-                    }]
-                }
-            });
+        // Insert a new row at the correct position
+        await gapi.client.sheets.spreadsheets.batchUpdate({
+            spreadsheetId: spreadsheetId,
+            resource: {
+                requests: [{
+                    insertDimension: {
+                        range: {
+                            sheetId: 0,
+                            dimension: 'ROWS',
+                            startIndex: insertionRow - 1,
+                            endIndex: insertionRow
+                        },
+                        inheritFromBefore: false
+                    }
+                }]
+            }
+        });
 
-            // Now write data to the newly inserted row
-            await gapi.client.sheets.spreadsheets.values.update({
-                spreadsheetId: spreadsheetId,
-                range: `A${sumRow}:E${sumRow}`,
-                valueInputOption: 'USER_ENTERED',
-                resource: {
-                    values: [data]
-                }
-            });
-        } else {
-            // No SUM formula exists yet, append normally
-            await gapi.client.sheets.spreadsheets.values.append({
-                spreadsheetId: spreadsheetId,
-                range: 'A:E',
-                valueInputOption: 'USER_ENTERED',
-                insertDataOption: 'INSERT_ROWS',
-                resource: {
-                    values: [data]
-                }
-            });
+        // Write data to the newly inserted row
+        await gapi.client.sheets.spreadsheets.values.update({
+            spreadsheetId: spreadsheetId,
+            range: `A${insertionRow}:E${insertionRow}`,
+            valueInputOption: 'USER_ENTERED',
+            resource: {
+                values: [data]
+            }
+        });
 
-            // Create initial SUM formula
-            await this.updateSumFormula(spreadsheetId);
-        }
+        // Update SUM formula to include the new row
+        await this.updateSumFormula(spreadsheetId);
 
         console.log('✅ Auto-synced complete record to Google Sheets');
     }
 
+    async findCorrectInsertionRow(spreadsheetId, newDate) {
+        try {
+            // Get both data values and formatting
+            const [valuesResponse, formatResponse] = await Promise.all([
+                gapi.client.sheets.spreadsheets.values.get({
+                    spreadsheetId: spreadsheetId,
+                    range: 'A:E'
+                }),
+                gapi.client.sheets.spreadsheets.get({
+                    spreadsheetId: spreadsheetId,
+                    ranges: ['D:D'],
+                    fields: 'sheets(data(rowData(values(effectiveFormat(backgroundColor)))))'
+                })
+            ]);
+
+            const values = valuesResponse.result.values;
+            const sheet = formatResponse.result.sheets[0];
+
+            if (!values || values.length < 2) {
+                return 2; // No data, insert at row 2
+            }
+
+            const rowData = sheet?.data?.[0]?.rowData || [];
+            const newDateObj = new Date(newDate);
+
+            // Find the SUM formula row to avoid inserting after it
+            const sumRow = await this.findSumFormulaRow(spreadsheetId);
+
+            // Iterate through data rows (skip header at index 0)
+            for (let i = 1; i < values.length; i++) {
+                const row = values[i];
+                const rowNumber = i + 1; // 1-indexed row number
+
+                // Stop if we hit the SUM formula row
+                if (sumRow && rowNumber === sumRow) {
+                    console.log(`📊 Reached SUM formula at row ${rowNumber}, inserting before it`);
+                    return rowNumber;
+                }
+
+                // Check if this row is highlighted (old pay period)
+                const rowFormatData = rowData[i];
+                const cell = rowFormatData?.values?.[0];
+                const bgColor = cell?.effectiveFormat?.backgroundColor;
+
+                const isHighlighted = bgColor &&
+                    !(bgColor.red === 1 && bgColor.green === 1 && bgColor.blue === 1) &&
+                    !(bgColor.red === undefined && bgColor.green === undefined && bgColor.blue === undefined);
+
+                // Skip highlighted rows (old pay periods) - don't insert among them
+                if (isHighlighted) {
+                    continue;
+                }
+
+                // This is an unhighlighted row - check date order
+                const rowDate = row[0]; // Date is in column A
+                if (!rowDate) continue;
+
+                const rowDateObj = new Date(rowDate);
+
+                // Insert before this row if new date is earlier
+                if (newDateObj < rowDateObj) {
+                    console.log(`📊 Found insertion point at row ${rowNumber} (before ${rowDate})`);
+                    return rowNumber;
+                }
+            }
+
+            // If we get here, insert at the end (before SUM formula)
+            if (sumRow) {
+                console.log(`📊 Inserting at end of data, before SUM formula at row ${sumRow}`);
+                return sumRow;
+            }
+
+            // No SUM formula exists, append at the end
+            console.log(`📊 Appending at end of data at row ${values.length + 1}`);
+            return values.length + 1;
+
+        } catch (error) {
+            console.error('Error finding insertion row:', error);
+            // Fallback: insert before SUM formula or at end
+            const sumRow = await this.findSumFormulaRow(spreadsheetId);
+            return sumRow || 2;
+        }
+    }
+
+    async findFirstUnhighlightedRow(spreadsheetId) {
+        try {
+            // Get cell formatting information for the duration column (D)
+            const response = await gapi.client.sheets.spreadsheets.get({
+                spreadsheetId: spreadsheetId,
+                ranges: ['D:D'],
+                fields: 'sheets(data(rowData(values(effectiveFormat(backgroundColor)))))'
+            });
+
+            const sheet = response.result.sheets[0];
+            if (!sheet || !sheet.data || !sheet.data[0] || !sheet.data[0].rowData) {
+                return 2; // Default to row 2 (first data row after header)
+            }
+
+            const rowData = sheet.data[0].rowData;
+
+            // Start from row 2 (index 1) since row 1 is the header
+            for (let i = 1; i < rowData.length; i++) {
+                const row = rowData[i];
+
+                // Check if row has values
+                if (!row.values || !row.values[0]) {
+                    continue; // Skip empty rows
+                }
+
+                const cell = row.values[0];
+                const bgColor = cell.effectiveFormat?.backgroundColor;
+
+                // Check if cell is NOT highlighted (white or no background)
+                // Default white in Google Sheets is {red: 1, green: 1, blue: 1}
+                const isWhiteOrUncolored = !bgColor ||
+                    (bgColor.red === 1 && bgColor.green === 1 && bgColor.blue === 1) ||
+                    (bgColor.red === undefined && bgColor.green === undefined && bgColor.blue === undefined);
+
+                if (isWhiteOrUncolored) {
+                    console.log(`📊 Found first unhighlighted row at: ${i + 1}`);
+                    return i + 1; // Return 1-indexed row number
+                }
+            }
+
+            // If all rows are highlighted, default to row 2
+            console.log('⚠️ All rows appear to be highlighted, defaulting to row 2');
+            return 2;
+        } catch (error) {
+            console.error('Error finding unhighlighted rows:', error);
+            return 2; // Default to row 2 on error
+        }
+    }
+
     async updateSumFormula(spreadsheetId) {
         try {
+            console.log('🔄 Updating SUM formula...');
+
             // Check if SUM formula already exists
             const existingSumRow = await this.findSumFormulaRow(spreadsheetId);
+            console.log(`📊 Existing SUM row: ${existingSumRow}`);
+
+            // Find the first unhighlighted row (start of new pay period)
+            const firstUnhighlightedRow = await this.findFirstUnhighlightedRow(spreadsheetId);
+            console.log(`📊 First unhighlighted row: ${firstUnhighlightedRow}`);
+
             if (existingSumRow) {
-                console.log(`✅ SUM formula already exists at row ${existingSumRow}`);
-                return; // Formula already exists, no need to recreate
+                // Formula should end at the row just before the SUM formula row to avoid circular reference
+                const lastDataRow = existingSumRow - 1;
+                const sumFormula = `=SUM(D${firstUnhighlightedRow}:D${lastDataRow})`;
+
+                console.log(`📊 SUM formula exists at row ${existingSumRow}`);
+                console.log(`📊 Updating formula to: ${sumFormula} (rows ${firstUnhighlightedRow} to ${lastDataRow})`);
+
+                await gapi.client.sheets.spreadsheets.values.update({
+                    spreadsheetId: spreadsheetId,
+                    range: `D${existingSumRow}`,
+                    valueInputOption: 'USER_ENTERED',
+                    resource: {
+                        values: [[sumFormula]]
+                    }
+                });
+
+                console.log(`✅ Successfully updated SUM formula to: ${sumFormula}`);
+                return;
             }
 
             // Get the current data to find where to place the formula
@@ -1014,10 +1140,11 @@ class TimeClockApp {
             const sumRow = lastDataRow + 1;
 
             // Create SUM formula for the duration column (column D)
-            // Use open-ended range that will automatically adjust as rows are inserted
-            const sumFormula = `=SUM(D2:D${lastDataRow})`;
+            // Formula ends at the last data row (one row before the formula itself)
+            // Start from first unhighlighted row to exclude old pay periods
+            const sumFormula = `=SUM(D${firstUnhighlightedRow}:D${lastDataRow})`;
 
-            console.log(`📊 Creating initial SUM formula at row ${sumRow}`);
+            console.log(`📊 Creating SUM formula at row ${sumRow}: ${sumFormula}`);
 
             // Add the SUM formula with label
             await gapi.client.sheets.spreadsheets.values.update({
@@ -1029,7 +1156,7 @@ class TimeClockApp {
                 }
             });
 
-            console.log(`✅ Created SUM formula at row ${sumRow}`);
+            console.log(`✅ Created SUM formula: ${sumFormula}`);
         } catch (error) {
             console.error('Error updating SUM formula:', error);
         }
