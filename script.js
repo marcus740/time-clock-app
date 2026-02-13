@@ -5,6 +5,12 @@ class TimeClockApp {
         this.isSignedIn = false;
         this.currentSession = null;
 
+        // Token management for persistent Google auth
+        this.tokenClient = null;
+        this.tokenExpiresAt = null;
+        this.tokenRefreshIntervalId = null;
+        this._isSilentRefresh = false;
+
         // Load records with error handling
         try {
             this.records = JSON.parse(localStorage.getItem('timeClockRecords') || '[]');
@@ -156,17 +162,12 @@ class TimeClockApp {
             document.getElementById('autoSyncEnabled').checked = autoSyncEnabled === 'true';
         }
 
-        // Try to restore Google auth state if available
+        // Check for previous Google auth state - actual re-auth happens in loadGoogleAPI()
         const savedAuthState = localStorage.getItem('googleAuthState');
         if (savedAuthState) {
             try {
-                const authState = JSON.parse(savedAuthState);
-                // Note: Access tokens expire, so we'll need to re-authenticate
-                // But we can remember that the user was previously connected
-                console.log('Previous Google Sheets connection found - will attempt to reconnect');
-                
-                // Show that user was previously connected
-                this.showConnectionReminder();
+                JSON.parse(savedAuthState);
+                console.log('Previous Google Sheets connection found - will attempt auto-reconnect after API loads');
             } catch (error) {
                 console.log('Could not restore auth state:', error);
                 localStorage.removeItem('googleAuthState');
@@ -279,8 +280,36 @@ class TimeClockApp {
             this.updateAuthStatus();
             console.log('✅ Google API and Identity Services initialized successfully');
 
+            // Attempt silent re-auth if user was previously connected
+            this.attemptSilentReauth();
+
         } catch (error) {
             console.error('❌ Failed to load Google API:', error);
+        }
+    }
+
+    attemptSilentReauth() {
+        const savedAuthState = localStorage.getItem('googleAuthState');
+        if (!savedAuthState) return;
+
+        try {
+            const authState = JSON.parse(savedAuthState);
+            if (!authState.isConnected) return;
+        } catch (e) {
+            return;
+        }
+
+        console.log('🔄 Previous connection detected, attempting silent re-authorization...');
+
+        this.initTokenClient();
+        this._isSilentRefresh = true;
+
+        try {
+            this.tokenClient.requestAccessToken({ prompt: '' });
+        } catch (error) {
+            console.log('Silent re-auth failed (expected if user session expired):', error);
+            this._isSilentRefresh = false;
+            this.showConnectionReminder();
         }
     }
 
@@ -645,6 +674,56 @@ class TimeClockApp {
         return csvContent;
     }
 
+    initTokenClient() {
+        if (this.tokenClient) return;
+
+        this.tokenClient = google.accounts.oauth2.initTokenClient({
+            client_id: '172233323706-0089j5fuie81o8abd5lt64togifdoefc.apps.googleusercontent.com',
+            scope: 'https://www.googleapis.com/auth/spreadsheets',
+            callback: (response) => {
+                this.handleTokenResponse(response);
+            },
+        });
+    }
+
+    handleTokenResponse(response) {
+        if (response.error) {
+            console.error('Token request failed:', response.error);
+            this.handleAuthFailure();
+            return;
+        }
+
+        if (response.access_token) {
+            this.accessToken = response.access_token;
+            this.isSignedIn = true;
+
+            // Track expiry: response.expires_in is seconds (typically 3600)
+            const expiresInMs = (response.expires_in || 3600) * 1000;
+            this.tokenExpiresAt = Date.now() + expiresInMs;
+
+            // Set the token on the gapi client immediately
+            gapi.client.setToken({ access_token: this.accessToken });
+
+            // Start the auto-refresh timer
+            this.startTokenRefreshTimer(expiresInMs);
+
+            this.updateAuthStatus();
+            this.updateSystemStatus();
+            this.saveGoogleSheetsSettings();
+
+            if (!this._isSilentRefresh) {
+                this.showNotification('Successfully connected to Google Sheets!', 'success');
+            } else {
+                console.log('🔄 Token silently refreshed');
+            }
+            this._isSilentRefresh = false;
+
+            console.log(`🔑 Token acquired, expires in ${response.expires_in}s (at ${new Date(this.tokenExpiresAt).toLocaleTimeString()})`);
+        } else {
+            this.handleAuthFailure();
+        }
+    }
+
     handleGoogleAuth() {
         if (!this.isGoogleApiLoaded) {
             this.showNotification('Google API not loaded yet. Please try again.', 'error');
@@ -652,33 +731,139 @@ class TimeClockApp {
         }
 
         if (this.isSignedIn) {
-            // Sign out
-            google.accounts.id.disableAutoSelect();
-            this.isSignedIn = false;
-            this.accessToken = null;
-            localStorage.removeItem('googleAuthState');
-            this.updateAuthStatus();
-            this.showNotification('Signed out from Google Sheets', 'info');
+            this.signOut();
         } else {
-            // Sign in - request access token for Sheets API
-            const client = google.accounts.oauth2.initTokenClient({
-                client_id: '172233323706-0089j5fuie81o8abd5lt64togifdoefc.apps.googleusercontent.com',
-                scope: 'https://www.googleapis.com/auth/spreadsheets',
-                callback: (response) => {
-                    if (response.access_token) {
-                        this.accessToken = response.access_token;
-                        this.isSignedIn = true;
-                        this.updateAuthStatus();
-                        this.updateSystemStatus();
-                        this.saveGoogleSheetsSettings();
-                        this.showNotification('Successfully connected to Google Sheets!', 'success');
-                    } else {
-                        this.showNotification('Failed to get access token', 'error');
-                    }
-                },
-            });
-            client.requestAccessToken();
+            this._isSilentRefresh = false;
+            this.initTokenClient();
+            this.tokenClient.requestAccessToken();
         }
+    }
+
+    signOut() {
+        google.accounts.id.disableAutoSelect();
+
+        if (this.accessToken) {
+            google.accounts.oauth2.revoke(this.accessToken, () => {
+                console.log('Token revoked');
+            });
+        }
+
+        this.isSignedIn = false;
+        this.accessToken = null;
+        this.tokenExpiresAt = null;
+        this.stopTokenRefreshTimer();
+
+        gapi.client.setToken(null);
+        localStorage.removeItem('googleAuthState');
+
+        this.updateAuthStatus();
+        this.updateSystemStatus();
+        this.showNotification('Signed out from Google Sheets', 'info');
+    }
+
+    // --- Token Auto-Refresh ---
+
+    startTokenRefreshTimer(expiresInMs) {
+        this.stopTokenRefreshTimer();
+
+        // Refresh at 75% of the token lifetime (~45 min for a 60-min token)
+        const refreshInterval = Math.floor(expiresInMs * 0.75);
+
+        console.log(`⏱️ Token refresh scheduled in ${Math.floor(refreshInterval / 60000)} minutes`);
+
+        this.tokenRefreshIntervalId = setInterval(() => {
+            this.silentTokenRefresh();
+        }, refreshInterval);
+    }
+
+    stopTokenRefreshTimer() {
+        if (this.tokenRefreshIntervalId) {
+            clearInterval(this.tokenRefreshIntervalId);
+            this.tokenRefreshIntervalId = null;
+        }
+    }
+
+    silentTokenRefresh() {
+        if (!this.tokenClient) {
+            console.warn('Cannot refresh: token client not initialized');
+            this.handleAuthFailure();
+            return;
+        }
+
+        console.log('🔄 Attempting silent token refresh...');
+        this._isSilentRefresh = true;
+
+        try {
+            this.tokenClient.requestAccessToken({ prompt: '' });
+        } catch (error) {
+            console.error('Silent token refresh failed:', error);
+            this._isSilentRefresh = false;
+            this.handleAuthFailure();
+        }
+    }
+
+    isTokenExpired() {
+        if (!this.tokenExpiresAt) return true;
+        // Consider expired 60 seconds before actual expiry for safety margin
+        return Date.now() >= (this.tokenExpiresAt - 60000);
+    }
+
+    handleAuthFailure() {
+        const wasSignedIn = this.isSignedIn;
+
+        this.isSignedIn = false;
+        this.accessToken = null;
+        this.tokenExpiresAt = null;
+        this.stopTokenRefreshTimer();
+
+        gapi.client.setToken(null);
+
+        this.updateAuthStatus();
+        this.updateSystemStatus();
+
+        if (wasSignedIn) {
+            this.showNotification('Google Sheets connection lost. Click "Connect" to reconnect.', 'error');
+        }
+    }
+
+    waitForTokenRefresh() {
+        return new Promise((resolve) => {
+            if (!this.tokenClient) {
+                resolve(false);
+                return;
+            }
+
+            const previousToken = this.accessToken;
+            const timeoutId = setTimeout(() => {
+                clearInterval(checkInterval);
+                resolve(false);
+            }, 10000);
+
+            this._isSilentRefresh = true;
+
+            try {
+                this.tokenClient.requestAccessToken({ prompt: '' });
+            } catch (error) {
+                this._isSilentRefresh = false;
+                clearTimeout(timeoutId);
+                resolve(false);
+                return;
+            }
+
+            // Poll for the token to change (handleTokenResponse will update it)
+            const checkInterval = setInterval(() => {
+                if (this.accessToken !== previousToken && this.accessToken !== null) {
+                    clearInterval(checkInterval);
+                    clearTimeout(timeoutId);
+                    resolve(true);
+                }
+                if (!this.isSignedIn && this.accessToken === null) {
+                    clearInterval(checkInterval);
+                    clearTimeout(timeoutId);
+                    resolve(false);
+                }
+            }, 100);
+        });
     }
 
     handleSignInResponse(response) {
@@ -723,6 +908,16 @@ class TimeClockApp {
             return;
         }
 
+        // Check if token is expired before making calls
+        if (this.isTokenExpired()) {
+            console.log('🔑 Token expired before API call, attempting refresh...');
+            const refreshed = await this.waitForTokenRefresh();
+            if (!refreshed) {
+                console.error('Could not refresh token for auto-sync');
+                return;
+            }
+        }
+
         try {
             // Set the access token for gapi
             gapi.client.setToken({
@@ -737,8 +932,31 @@ class TimeClockApp {
                 await this.appendCompleteRowToSheets(spreadsheetId, record);
             }
         } catch (error) {
-            console.error('Auto-sync failed:', error);
-            // Don't show error notification for auto-sync failures to avoid interrupting workflow
+            // Check if this is a 401 Unauthorized error
+            const status = error?.result?.error?.code || error?.status;
+            if (status === 401) {
+                console.warn('⚠️ API call returned 401 -- token expired, attempting refresh...');
+                const refreshed = await this.waitForTokenRefresh();
+                if (refreshed) {
+                    console.log('🔑 Token refreshed, retrying auto-sync...');
+                    gapi.client.setToken({ access_token: this.accessToken });
+                    try {
+                        if (action === 'clockIn') {
+                            await this.appendClockInToSheets(spreadsheetId, record);
+                        } else if (action === 'clockOut') {
+                            await this.updateClockOutInSheets(spreadsheetId, record);
+                        } else if (action === 'manualEntry') {
+                            await this.appendCompleteRowToSheets(spreadsheetId, record);
+                        }
+                    } catch (retryError) {
+                        console.error('Auto-sync retry failed:', retryError);
+                    }
+                } else {
+                    this.handleAuthFailure();
+                }
+            } else {
+                console.error('Auto-sync failed:', error);
+            }
         }
     }
 
