@@ -1189,7 +1189,7 @@ class TimeClockApp {
                 }),
                 gapi.client.sheets.spreadsheets.get({
                     spreadsheetId: spreadsheetId,
-                    ranges: ['D:D'],
+                    ranges: ['A:A'],
                     fields: 'sheets(data(rowData(values(effectiveFormat(backgroundColor)))))'
                 })
             ]);
@@ -1202,20 +1202,21 @@ class TimeClockApp {
             }
 
             const rowData = sheet?.data?.[0]?.rowData || [];
-            const newDateObj = new Date(newDate);
 
             // Find the SUM formula row to avoid inserting after it
             const sumRow = await this.findSumFormulaRow(spreadsheetId);
 
+            // First pass: find where the unhighlighted section starts
+            let firstUnhighlightedRow = null;
+            let inHighlightedSection = true;
+
             // Iterate through data rows (skip header at index 0)
             for (let i = 1; i < values.length; i++) {
-                const row = values[i];
                 const rowNumber = i + 1; // 1-indexed row number
 
                 // Stop if we hit the SUM formula row
                 if (sumRow && rowNumber === sumRow) {
-                    console.log(`📊 Reached SUM formula at row ${rowNumber}, inserting before it`);
-                    return rowNumber;
+                    break;
                 }
 
                 // Check if this row is highlighted (old pay period)
@@ -1227,20 +1228,40 @@ class TimeClockApp {
                     !(bgColor.red === 1 && bgColor.green === 1 && bgColor.blue === 1) &&
                     !(bgColor.red === undefined && bgColor.green === undefined && bgColor.blue === undefined);
 
-                // Skip highlighted rows (old pay periods) - don't insert among them
-                if (isHighlighted) {
-                    continue;
+                // Track when we exit the highlighted section
+                if (inHighlightedSection && !isHighlighted) {
+                    inHighlightedSection = false;
+                    firstUnhighlightedRow = rowNumber;
+                    console.log(`📊 Unhighlighted section starts at row ${firstUnhighlightedRow}`);
+                }
+            }
+
+            // If no unhighlighted section found, all rows are highlighted - insert before SUM or at end
+            if (firstUnhighlightedRow === null) {
+                console.log(`📊 No unhighlighted rows found, inserting before SUM formula or at end`);
+                if (sumRow) {
+                    return sumRow;
+                }
+                return values.length + 1;
+            }
+
+            // Second pass: find correct position within unhighlighted section by date order
+            for (let i = firstUnhighlightedRow - 1; i < values.length; i++) {
+                const row = values[i];
+                const rowNumber = i + 1;
+
+                // Stop if we hit the SUM formula row
+                if (sumRow && rowNumber === sumRow) {
+                    return rowNumber;
                 }
 
-                // This is an unhighlighted row - check date order
                 const rowDate = row[0]; // Date is in column A
                 if (!rowDate) continue;
 
-                const rowDateObj = new Date(rowDate);
-
-                // Insert before this row if new date is earlier
-                if (newDateObj < rowDateObj) {
-                    console.log(`📊 Found insertion point at row ${rowNumber} (before ${rowDate})`);
+                // Compare dates as strings (YYYY-MM-DD format allows direct string comparison)
+                // Insert before this row if new date is earlier (lexicographically)
+                if (newDate < rowDate) {
+                    console.log(`📊 Found insertion point at row ${rowNumber} (date ${newDate} before ${rowDate})`);
                     return rowNumber;
                 }
             }
