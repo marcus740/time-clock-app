@@ -1023,8 +1023,8 @@ class TimeClockApp {
             record.notes || ''
         ];
 
-        // Find the correct insertion position based on date order
-        const insertionRow = await this.findCorrectInsertionRow(spreadsheetId, record.date);
+        // Find the correct insertion position based on date and time order
+        const insertionRow = await this.findCorrectInsertionRow(spreadsheetId, record.date, new Date(record.clockInTime).toLocaleTimeString());
 
         console.log(`📊 Inserting new clock-in at row ${insertionRow} (date: ${record.date})`);
 
@@ -1140,8 +1140,8 @@ class TimeClockApp {
             record.notes || ''
         ];
 
-        // Find the correct insertion position based on date order
-        const insertionRow = await this.findCorrectInsertionRow(spreadsheetId, record.date);
+        // Find the correct insertion position based on date and time order
+        const insertionRow = await this.findCorrectInsertionRow(spreadsheetId, record.date, new Date(record.clockInTime).toLocaleTimeString());
 
         console.log(`📊 Inserting complete record at row ${insertionRow} (date: ${record.date})`);
 
@@ -1179,9 +1179,9 @@ class TimeClockApp {
         console.log('✅ Auto-synced complete record to Google Sheets');
     }
 
-    async findCorrectInsertionRow(spreadsheetId, newDate) {
+    async findCorrectInsertionRow(spreadsheetId, newDate, newClockInTime) {
         try {
-            // Get both data values and formatting
+            // Fetch values and column A formatting in parallel
             const [valuesResponse, formatResponse] = await Promise.all([
                 gapi.client.sheets.spreadsheets.values.get({
                     spreadsheetId: spreadsheetId,
@@ -1203,32 +1203,24 @@ class TimeClockApp {
 
             const rowData = sheet?.data?.[0]?.rowData || [];
 
-            // Find the SUM formula row to avoid inserting after it
-            const sumRow = await this.findSumFormulaRow(spreadsheetId);
-
-            // First pass: find where the unhighlighted section starts
+            // Pass 1: find where the unhighlighted (current pay period) section starts.
+            // Scan the entire sheet — do NOT break on the SUM row so we can find
+            // unhighlighted rows that appear after it.
             let firstUnhighlightedRow = null;
             let inHighlightedSection = true;
 
-            // Iterate through data rows (skip header at index 0)
             for (let i = 1; i < values.length; i++) {
-                const rowNumber = i + 1; // 1-indexed row number
+                const row = values[i];
+                const rowNumber = i + 1;
 
-                // Stop if we hit the SUM formula row
-                if (sumRow && rowNumber === sumRow) {
-                    break;
-                }
+                // Skip the SUM formula row — it's not a data row
+                if (row[2] === 'Total Hours:') continue;
 
-                // Check if this row is highlighted (old pay period)
-                const rowFormatData = rowData[i];
-                const cell = rowFormatData?.values?.[0];
-                const bgColor = cell?.effectiveFormat?.backgroundColor;
-
+                const bgColor = rowData[i]?.values?.[0]?.effectiveFormat?.backgroundColor;
                 const isHighlighted = bgColor &&
                     !(bgColor.red === 1 && bgColor.green === 1 && bgColor.blue === 1) &&
                     !(bgColor.red === undefined && bgColor.green === undefined && bgColor.blue === undefined);
 
-                // Track when we exit the highlighted section
                 if (inHighlightedSection && !isHighlighted) {
                     inHighlightedSection = false;
                     firstUnhighlightedRow = rowNumber;
@@ -1236,51 +1228,50 @@ class TimeClockApp {
                 }
             }
 
-            // If no unhighlighted section found, all rows are highlighted - insert before SUM or at end
+            // If no unhighlighted section found, append at the end
             if (firstUnhighlightedRow === null) {
-                console.log(`📊 No unhighlighted rows found, inserting before SUM formula or at end`);
-                if (sumRow) {
-                    return sumRow;
-                }
+                console.log(`📊 No unhighlighted rows found, appending at end`);
                 return values.length + 1;
             }
 
-            // Second pass: find correct position within unhighlighted section by date order
+            // Pass 2: find the correct chronological position within the unhighlighted section.
+            // Compare by date first, then by clock-in time for same-day entries.
+            const newDateTime = new Date(`${newDate} ${newClockInTime}`);
+
             for (let i = firstUnhighlightedRow - 1; i < values.length; i++) {
                 const row = values[i];
                 const rowNumber = i + 1;
 
-                // Stop if we hit the SUM formula row
-                if (sumRow && rowNumber === sumRow) {
+                // Stop before the SUM formula row — insertDimension will push it down automatically
+                if (row[2] === 'Total Hours:') {
+                    console.log(`📊 Reached SUM row, inserting at row ${rowNumber}`);
                     return rowNumber;
                 }
 
-                const rowDate = row[0]; // Date is in column A
+                const rowDate = row[0];
                 if (!rowDate) continue;
 
-                // Compare dates as strings (YYYY-MM-DD format allows direct string comparison)
-                // Insert before this row if new date is earlier (lexicographically)
                 if (newDate < rowDate) {
-                    console.log(`📊 Found insertion point at row ${rowNumber} (date ${newDate} before ${rowDate})`);
+                    console.log(`📊 Inserting at row ${rowNumber} (date ${newDate} before ${rowDate})`);
                     return rowNumber;
+                }
+
+                if (newDate === rowDate) {
+                    const rowTime = row[1];
+                    if (rowTime && newDateTime < new Date(`${rowDate} ${rowTime}`)) {
+                        console.log(`📊 Inserting at row ${rowNumber} (same date, ${newClockInTime} before ${rowTime})`);
+                        return rowNumber;
+                    }
                 }
             }
 
-            // If we get here, insert at the end (before SUM formula)
-            if (sumRow) {
-                console.log(`📊 Inserting at end of data, before SUM formula at row ${sumRow}`);
-                return sumRow;
-            }
-
-            // No SUM formula exists, append at the end
+            // New entry is the latest — append after all existing data
             console.log(`📊 Appending at end of data at row ${values.length + 1}`);
             return values.length + 1;
 
         } catch (error) {
             console.error('Error finding insertion row:', error);
-            // Fallback: insert before SUM formula or at end
-            const sumRow = await this.findSumFormulaRow(spreadsheetId);
-            return sumRow || 2;
+            return 2;
         }
     }
 
